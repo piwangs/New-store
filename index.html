@@ -202,24 +202,39 @@
       <form id="itemForm" class="p-6 space-y-4">
         
         <div id="modalLocationWrapper" class="bg-amber-50 border border-amber-200 p-3 rounded-lg">
-          <label class="block text-xs font-bold text-amber-900 mb-1"><i class="fa-solid fa-store mr-1 text-amber-600"></i>Store Location for Quantity Edits:</label>
+          <label class="block text-xs font-bold text-amber-900 mb-1"><i class="fa-solid fa-store mr-1 text-amber-600"></i>Store Location for Quantity Edits only:</label>
           <select id="itemTargetLocation" class="w-full bg-white border border-amber-300 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-800 focus:ring-amber-500"></select>
-          <p class="text-[10px] text-amber-700 mt-1">* Description, Category, & Unit edits sync globally to all locations.</p>
+          <p class="text-[10px] text-amber-700 mt-1">Opening / Added / Issues are location-specific. Item ID, Description, Category and Unit are global master data.</p>
         </div>
 
-        <div class="grid grid-cols-3 gap-3">
-          <div>
-            <label class="block text-xs font-semibold mb-1 text-slate-600">Item ID</label>
-            <input id="itemId" required readonly class="w-full bg-slate-100 border rounded-lg px-3 py-2 text-xs font-mono font-bold text-slate-600" placeholder="Auto">
+        <div class="bg-blue-50 border border-blue-200 p-3 rounded-lg space-y-3">
+          <p class="text-[10px] text-blue-800 font-semibold"><i class="fa-solid fa-globe mr-1"></i>GLOBAL MASTER DATA — changes apply to every depot and every date</p>
+          <div class="grid grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-semibold mb-1 text-slate-600">Item ID (Global)</label>
+              <input id="itemId" required readonly class="w-full bg-slate-100 border rounded-lg px-3 py-2 text-xs font-mono font-bold text-slate-600" placeholder="Auto">
+            </div>
+            <div class="col-span-2">
+              <label class="block text-xs font-semibold mb-1 text-slate-600">Description (Global)</label>
+              <input id="itemDescription" required maxlength="120" class="w-full border rounded-lg px-3 py-2 text-xs">
+            </div>
           </div>
-          <div class="col-span-2">
-            <label class="block text-xs font-semibold mb-1 text-slate-600">Item Description (Syncs Globally)</label>
-            <input id="itemDescription" required maxlength="120" class="w-full border rounded-lg px-3 py-2 text-xs">
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold mb-1 text-slate-600">Category (Global)</label>
+              <select id="itemCategory" required class="w-full border rounded-lg px-3 py-2 text-xs">
+                <option>Dry Food Items</option>
+                <option>Soft Drinks</option>
+                <option>Alcoholic</option>
+                <option>Frozen</option>
+                <option>Fresh Food Items</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold mb-1 text-slate-600">Unit (Global)</label>
+              <input id="itemSpec" required maxlength="30" placeholder="Kg, Pkt, Can" class="w-full border rounded-lg px-3 py-2 text-xs">
+            </div>
           </div>
-        </div>
-        <div class="grid grid-cols-2 gap-3">
-          <div><label class="block text-xs font-semibold mb-1 text-slate-600">Category (Syncs Globally)</label><select id="itemCategory" required class="w-full border rounded-lg px-3 py-2 text-xs"><option>Dry Food Items</option><option>Soft Drinks</option><option>Alcoholic</option><option>Frozen</option><option>Fresh Food Items</option></select></div>
-          <div><label class="block text-xs font-semibold mb-1 text-slate-600">Unit (Syncs Globally)</label><input id="itemSpec" required maxlength="30" placeholder="Kg, Pkt, Can" class="w-full border rounded-lg px-3 py-2 text-xs"></div>
         </div>
         <div class="grid grid-cols-3 gap-3">
           <div><label class="block text-xs font-semibold mb-1 text-slate-600">Opening Stock</label><input id="itemOpening" type="number" min="0" step="any" required value="0" class="w-full border rounded-lg px-3 py-2 text-xs"></div>
@@ -981,7 +996,7 @@ async function openNewItemModal() {
   const { data, error } = await db.rpc('get_next_item_code');
   const nextCode = (!error && data) ? data : "001";
 
-  $("modalTitle").textContent = "Add New Master Item";
+  $("modalTitle").textContent = "Add New Master Item (appears in ALL depots)";
   $("itemId").value = nextCode;
   $("itemId").readOnly = true;
   $("itemDescription").value = "";
@@ -1017,59 +1032,105 @@ function closeItemModal() {
 async function saveItem(e) {
   e.preventDefault();
   const targetLocation = isManager() ? $("itemTargetLocation").value : activeLocation;
+  const itemCode = $("itemId").value.trim();
+  const isNewItem = !currentItems.some(i => i.item_code === itemCode);
 
-  const payload = {
-    p_username: currentUser.username,
-    p_location: targetLocation,
-    p_entry_date: dateKey(),
-    p_item_code: $("itemId").value.trim(),
+  // Global master fields – these must be identical in every depot
+  const globalFields = {
+    p_item_code: itemCode,
     p_description: $("itemDescription").value.trim(),
     p_category: $("itemCategory").value,
-    p_unit: $("itemSpec").value.trim(),
-    p_opening: Number($("itemOpening").value) || 0,
-    p_added: Number($("itemAdded").value) || 0,
-    p_issues: Number($("itemIssues").value) || 0,
+    p_unit: $("itemSpec").value.trim()
+  };
+
+  const basePayload = {
+    p_username: currentUser.username,
+    p_entry_date: dateKey(),
+    ...globalFields,
     p_cost: Number($("itemCost").value) || 0,
     p_price: Number($("itemPrice").value) || 0,
     p_comments: $("itemComments").value.trim()
   };
 
+  // Quantities are location-specific
+  const opening = Number($("itemOpening").value) || 0;
+  const added   = Number($("itemAdded").value) || 0;
+  const issues  = Number($("itemIssues").value) || 0;
+
   if (!isOnline) {
-    // Optimistic local update + queue
-    const existingIdx = currentItems.findIndex(i => i.item_code === payload.p_item_code);
+    // Offline: only update the currently active location + queue the mutation
+    const existingIdx = currentItems.findIndex(i => i.item_code === itemCode);
     const localItem = {
       id: existingIdx >= 0 ? currentItems[existingIdx].id : Date.now(),
-      item_code: payload.p_item_code,
-      description: payload.p_description,
-      category: payload.p_category,
-      unit: payload.p_unit,
-      opening: payload.p_opening,
-      added: payload.p_added,
-      issues: payload.p_issues,
-      cost: payload.p_cost,
-      price: payload.p_price,
-      comments: payload.p_comments
+      item_code: itemCode,
+      description: globalFields.p_description,
+      category: globalFields.p_category,
+      unit: globalFields.p_unit,
+      opening, added, issues,
+      cost: basePayload.p_cost,
+      price: basePayload.p_price,
+      comments: basePayload.p_comments
     };
     if (existingIdx >= 0) currentItems[existingIdx] = localItem;
     else currentItems.push(localItem);
     currentItems.sort((a, b) => a.item_code.localeCompare(b.item_code));
     await cacheInventory(activeLocation, dateKey(), currentItems);
-    await enqueueMutation({ type: "upsert", payload });
+
+    // Queue a single upsert for the target location; backend will still cascade metadata
+    await enqueueMutation({
+      type: "upsert",
+      payload: {
+        ...basePayload,
+        p_location: targetLocation,
+        p_opening: opening,
+        p_added: added,
+        p_issues: issues
+      }
+    });
+
     closeItemModal();
     renderTable();
     updateKPIs();
+    showSaveStatus(isNewItem ? "New item queued (will appear in all depots after sync)" : "Queued offline");
     return;
   }
 
-  const { error } = await db.rpc('secure_upsert_inventory', payload);
-  if (error) {
-    alert("Error saving: " + error.message);
-    return;
-  }
+  // ---------- ONLINE PATH ----------
+  try {
+    if (isNewItem && isManager()) {
+      // Brand-new master item → create a zero-stock row in EVERY depot
+      // so the item immediately appears everywhere.
+      for (const loc of allLocationsList) {
+        const locPayload = {
+          ...basePayload,
+          p_location: loc,
+          p_opening: (loc === targetLocation) ? opening : 0,
+          p_added:   (loc === targetLocation) ? added   : 0,
+          p_issues:  (loc === targetLocation) ? issues  : 0
+        };
+        const { error } = await db.rpc('secure_upsert_inventory', locPayload);
+        if (error) throw error;
+      }
+      showSaveStatus("New item created in ALL depots");
+    } else {
+      // Existing item or Storekeeper edit → only touch the chosen location
+      // (backend still cascades Description / Category / Unit globally)
+      const { error } = await db.rpc('secure_upsert_inventory', {
+        ...basePayload,
+        p_location: targetLocation,
+        p_opening: opening,
+        p_added: added,
+        p_issues: issues
+      });
+      if (error) throw error;
+      showSaveStatus(isManager() ? "Global catalog synced" : "Synced");
+    }
 
-  closeItemModal();
-  showSaveStatus("Synced");
-  loadCloudData();
+    closeItemModal();
+    loadCloudData();
+  } catch (err) {
+    alert("Error saving: " + (err.message || err));
+  }
 }
 
 async function deleteItem() {
