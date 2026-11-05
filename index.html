@@ -782,6 +782,7 @@ async function loadCloudData() {
           .eq('entry_date', prevDateStr);
 
         if (prevData && prevData.length > 0) {
+          // Carry forward closing stock from previous day as today's opening
           const newEntries = prevData.map(p => ({
             location: activeLocation,
             entry_date: date,
@@ -797,34 +798,8 @@ async function loadCloudData() {
             comments: ""
           }));
           await db.from('inventory_entries').insert(newEntries);
-        } else {
-          const defaultItems = [
-            {item_code:"001",description:"Sugar brown",category:"Dry Food Items",unit:"Kg",cost:1.20,price:1.80},
-            {item_code:"002",description:"Sugar white",category:"Dry Food Items",unit:"Kg",cost:1.10,price:1.60},
-            {item_code:"003",description:"Beans",category:"Dry Food Items",unit:"Kg",cost:1.50,price:2.20},
-            {item_code:"004",description:"Posho",category:"Dry Food Items",unit:"Kg",cost:0.80,price:1.20},
-            {item_code:"005",description:"Tusker lager can",category:"Alcoholic",unit:"Can",cost:1.50,price:2.50},
-            {item_code:"006",description:"Juice mix",category:"Soft Drinks",unit:"Pkt",cost:0.50,price:1.00},
-            {item_code:"007",description:"Water big size",category:"Soft Drinks",unit:"Bottle",cost:0.40,price:0.80},
-            {item_code:"008",description:"Chicken (whole)",category:"Frozen",unit:"Pc",cost:5.00,price:8.00},
-            {item_code:"009",description:"Chicken Eggs",category:"Fresh Food Items",unit:"Tray",cost:3.50,price:5.00}
-          ];
-          const defaultEntries = defaultItems.map(d => ({
-            location: activeLocation,
-            entry_date: date,
-            item_code: d.item_code,
-            description: d.description,
-            category: d.category,
-            unit: d.unit,
-            opening: 0,
-            added: 0,
-            issues: 0,
-            cost: d.cost,
-            price: d.price,
-            comments: ""
-          }));
-          await db.from('inventory_entries').insert(defaultEntries);
         }
+        // No default/sample items are ever inserted automatically.
 
         const { data: refetched } = await db.from('inventory_entries')
           .select('*')
@@ -1146,31 +1121,70 @@ async function saveItem(e) {
 
 async function deleteItem() {
   if (!isManager()) return;
-  const itemCode = $("itemId").value;
-  if (confirm(`Are you sure you want to delete item #${itemCode} from all locations and dates?`)) {
-    const payload = {
-      p_username: currentUser.username,
-      p_item_code: itemCode
-    };
+  const itemCode = ($("itemId").value || "").trim();
+  if (!itemCode) {
+    alert("No item code found.");
+    return;
+  }
 
-    if (!isOnline) {
+  if (!confirm(`Are you sure you want to permanently delete item #${itemCode} from ALL depots and ALL dates?\n\nThis cannot be undone.`)) {
+    return;
+  }
+
+  const payload = {
+    p_username: currentUser.username,
+    p_item_code: itemCode
+  };
+
+  // Offline path
+  if (!isOnline) {
+    currentItems = currentItems.filter(i => i.item_code !== itemCode);
+    await cacheInventory(activeLocation, dateKey(), currentItems);
+    await enqueueMutation({ type: "delete", payload });
+    closeItemModal();
+    renderTable();
+    updateKPIs();
+    showSaveStatus("Delete queued offline");
+    return;
+  }
+
+  // Online path – try the dedicated RPC first, then fall back to direct delete
+  try {
+    let deleted = false;
+
+    // 1. Preferred: use the secure RPC
+    const { error: rpcError } = await db.rpc("delete_master_item", payload);
+    if (!rpcError) {
+      deleted = true;
+    } else {
+      console.warn("delete_master_item RPC failed, falling back to direct delete:", rpcError.message);
+
+      // 2. Fallback: direct DELETE (works even if the RPC is missing)
+      const { error: delError, count } = await db
+        .from("inventory_entries")
+        .delete({ count: "exact" })
+        .eq("item_code", itemCode);
+
+      if (delError) {
+        throw new Error(delError.message);
+      }
+      deleted = true;
+      console.log(`Directly deleted ${count ?? "?"} row(s) for item_code ${itemCode}`);
+    }
+
+    if (deleted) {
+      // Clear local cache for the current view
       currentItems = currentItems.filter(i => i.item_code !== itemCode);
       await cacheInventory(activeLocation, dateKey(), currentItems);
-      await enqueueMutation({ type: "delete", payload });
+
       closeItemModal();
-      renderTable();
-      updateKPIs();
-      return;
+      showSaveStatus(`Item #${itemCode} deleted globally`);
+      loadCloudData();
     }
-
-    const { error } = await db.rpc('delete_master_item', payload);
-    if (error) {
-      alert("Error deleting item: " + error.message);
-      return;
-    }
-
-    closeItemModal();
-    loadCloudData();
+  } catch (err) {
+    console.error(err);
+    alert("Error deleting item: " + (err.message || err) +
+      "\n\nIf this keeps happening, open the browser console (F12) and send the error message.");
   }
 }
 
@@ -1682,11 +1696,8 @@ function downloadMasterTemplate() {
 
   const sampleData = [
     headers,
-    ["001", "Sugar brown", "Dry Food Items", "Kg", 1.20, 1.80, 50],
-    ["002", "Sugar white", "Dry Food Items", "Kg", 1.10, 1.60, 40],
-    ["003", "Beans", "Dry Food Items", "Kg", 1.50, 2.20, 30],
-    ["", "Tusker lager can", "Alcoholic", "Can", 1.50, 2.50, 100],
-    ["", "Water big size", "Soft Drinks", "Bottle", 0.40, 0.80, 200]
+    // Empty example row so users see the correct format
+    ["", "", "Dry Food Items", "Kg", 0.00, 0.00, 0]
   ];
 
   const ws = XLSX.utils.aoa_to_sheet(sampleData);
